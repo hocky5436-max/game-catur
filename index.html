@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="id" data-theme="light" data-board="wood">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#2f7d4f">
+  <meta name="description" content="Game catur berbahasa Indonesia: lawan komputer, dua pemain, dan mode belajar.">
+  <title>Catur Indonesia</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- ================= BAGIAN ATAS ================= -->
+  <header class="topbar">
+    <div class="brand"><span class="brand-logo" id="brandLogo"></span><span>Catur</span></div>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-view="play" role="tab" aria-selected="true">Bermain</button>
+      <button class="tab" data-view="learn" role="tab" aria-selected="false">Belajar</button>
+    </nav>
+    <button class="icon-btn" id="btnSettings" aria-label="Pengaturan" title="Pengaturan">
+      <svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+    </button>
+  </header>
+
+  <main>
+    <!-- ================= MODE BERMAIN ================= -->
+    <section class="view" id="playView">
+      <div class="game-layout">
+        <div class="board-area">
+          <div class="player-bar" id="barTop">
+            <div class="pl-info"><span class="pl-dot"></span><span class="pl-name"></span></div>
+            <div class="pl-captured"></div>
+            <div class="pl-clock" hidden></div>
+          </div>
+          <div class="board-frame"><div id="board"></div></div>
+          <div class="player-bar" id="barBottom">
+            <div class="pl-info"><span class="pl-dot"></span><span class="pl-name"></span></div>
+            <div class="pl-captured"></div>
+            <div class="pl-clock" hidden></div>
+          </div>
+        </div>
+
+        <aside class="panel">
+          <div class="card status-card">
+            <div class="status" id="status" aria-live="polite"></div>
+            <div class="note" id="aiNote" hidden></div>
+          </div>
+
+          <div class="controls">
+            <button class="btn" id="btnHint">
+              <svg viewBox="0 0 24 24"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.6 10.8c.6.5 1 1.2 1 2V16h5.2v-.2c0-.8.4-1.5 1-2A6 6 0 0 0 12 3Z"/></svg>
+              Petunjuk</button>
+            <button class="btn" id="btnUndo">
+              <svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+              Undo</button>
+            <button class="btn" id="btnRestart">
+              <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+              Mulai ulang</button>
+            <button class="btn" id="btnFlip">
+              <svg viewBox="0 0 24 24"><path d="m17 3 4 4-4 4"/><path d="M3 7h18M7 21l-4-4 4-4"/><path d="M21 17H3"/></svg>
+              Putar papan</button>
+            <button class="btn primary wide" id="btnNew">
+              <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+              Permainan Baru</button>
+          </div>
+
+          <div class="card history-card">
+            <div class="card-head">
+              <h2>Riwayat Langkah</h2>
+              <span class="game-info" id="gameInfo"></span>
+            </div>
+            <div class="move-list" id="moveList"></div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ================= MODE BELAJAR ================= -->
+    <section class="view" id="learnView" hidden>
+      <div class="learn-layout show-list" id="learnLayout">
+        <aside class="lesson-list" id="lessonList" aria-label="Daftar pelajaran"></aside>
+        <div class="lesson-main">
+          <div class="lesson-head">
+            <button class="btn small back-btn" id="btnLessonBack">← Daftar</button>
+            <div>
+              <h2 id="lessonTitle"></h2>
+              <div class="lesson-progress" id="lessonProgress"></div>
+            </div>
+          </div>
+          <div class="lesson-body">
+            <div class="lesson-board-area">
+              <div class="board-frame"><div id="lessonBoard"></div></div>
+            </div>
+            <div class="lesson-side">
+              <div class="card lesson-text" id="lessonText"></div>
+              <div class="card task-card">
+                <div class="task-label">Latihan</div>
+                <div class="task-prompt" id="taskPrompt"></div>
+                <div class="task-feedback" id="taskFeedback" aria-live="polite"></div>
+                <div class="controls">
+                  <button class="btn" id="btnTaskHint">Petunjuk</button>
+                  <button class="btn" id="btnTaskReset">Ulangi</button>
+                  <button class="btn primary wide" id="btnTaskNext" hidden>Lanjut →</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ================= JENDELA: PERMAINAN BARU ================= -->
+  <div class="modal" id="modalNew" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="newTitle">
+      <h2 id="newTitle">Permainan Baru</h2>
+      <div class="field">
+        <label>Mode permainan</label>
+        <div class="seg" data-name="mode">
+          <button data-value="ai">Lawan Komputer</button>
+          <button data-value="two">Dua Pemain</button>
+        </div>
+      </div>
+      <div class="field ai-only">
+        <label>Tingkat kesulitan</label>
+        <div class="seg" data-name="level">
+          <button data-value="1">Pemula</button>
+          <button data-value="2">Menengah</button>
+          <button data-value="3">Sulit</button>
+        </div>
+      </div>
+      <div class="field ai-only">
+        <label>Warna bidak Anda</label>
+        <div class="seg" data-name="color">
+          <button data-value="w">Putih</button>
+          <button data-value="b">Hitam</button>
+          <button data-value="r">Acak</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>Jam catur (per pemain)</label>
+        <div class="seg" data-name="clock">
+          <button data-value="0">Tanpa jam</button>
+          <button data-value="5">5 mnt</button>
+          <button data-value="10">10 mnt</button>
+          <button data-value="15">15 mnt</button>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" data-close>Batal</button>
+        <button class="btn primary" id="btnStart">Mulai</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= JENDELA: PENGATURAN ================= -->
+  <div class="modal" id="modalSettings" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="setTitle">
+      <h2 id="setTitle">Pengaturan</h2>
+      <div class="field">
+        <label>Tema papan</label>
+        <div class="seg theme-seg" data-name="board">
+          <button data-value="wood"><span class="swatch wood"></span>Klasik kayu</button>
+          <button data-value="green"><span class="swatch green"></span>Hijau</button>
+          <button data-value="blue"><span class="swatch blue"></span>Biru</button>
+        </div>
+      </div>
+      <label class="switch-row"><span>Mode gelap</span><input type="checkbox" id="optDark"><span class="switch"></span></label>
+      <label class="switch-row"><span>Efek suara</span><input type="checkbox" id="optSound"><span class="switch"></span></label>
+      <label class="switch-row"><span>Peringatan bidak bisa dimakan gratis</span><input type="checkbox" id="optWarn"><span class="switch"></span></label>
+      <label class="switch-row"><span>Putar papan otomatis (Dua Pemain)</span><input type="checkbox" id="optFlip"><span class="switch"></span></label>
+      <div class="field">
+        <label>Notasi riwayat langkah</label>
+        <div class="seg" data-name="notation">
+          <button data-value="intl">Internasional (N, B, R, Q, K)</button>
+          <button data-value="id">Indonesia (K, G, B, M, R)</button>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn primary" data-close>Selesai</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= JENDELA: PROMOSI ================= -->
+  <div class="modal" id="modalPromo" hidden>
+    <div class="modal-card promo-card" role="dialog" aria-modal="true" aria-labelledby="promoTitle">
+      <h2 id="promoTitle">Promosi pion</h2>
+      <p class="muted">Pion Anda sampai di ujung papan. Pilih bidak penggantinya:</p>
+      <div class="promo-grid" id="promoGrid"></div>
+      <div class="modal-actions"><button class="btn" data-promo="">Batal</button></div>
+    </div>
+  </div>
+
+  <!-- ================= JENDELA: DIALOG UMUM ================= -->
+  <div class="modal" id="modalDialog" hidden>
+    <div class="modal-card" role="alertdialog" aria-modal="true" aria-labelledby="dlgTitle">
+      <h2 id="dlgTitle"></h2>
+      <div class="dlg-body" id="dlgBody"></div>
+      <div class="modal-actions" id="dlgActions"></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <!-- Urutan skrip: aturan → AI → gambar bidak → papan → suara → tutorial → aplikasi -->
+  <script src="js/engine.js"></script>
+  <script src="js/ai.js"></script>
+  <script src="js/pieces.js"></script>
+  <script src="js/board.js"></script>
+  <script src="js/sound.js"></script>
+  <script src="js/tutorial.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
