@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASCII Black Hole</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0d14; overflow: hidden; }
+  canvas { display: block; position: fixed; inset: 0; width: 100vw; height: 100vh; }
+  #hud {
+    position: fixed; left: 14px; bottom: 12px;
+    font: 11px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color: #5f6884; letter-spacing: .04em;
+    pointer-events: none; user-select: none; white-space: pre;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<script>
+(() => {
+'use strict';
+
+/* =====================================================================
+   KONFIGURASI
+   ===================================================================== */
+const N       = 29861;          // jumlah partikel
+const LOOP    = 30;             // durasi satu siklus animasi (detik)
+const DIST    = 11;             // jarak kamera ke pusat (satuan dunia)
+const TAU     = Math.PI * 2;
+const CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789()[]{}=+*#%@;:<>/\\|&$!?~^-_.,';
+const NC      = CHARSET.length;
+const SIZES   = [8, 10];        // dua ukuran font: kecil (jauh) & besar (dekat)
+const CELL_W  = 6, CELL_H = 11; // grid "layar kode" pada fase kekacauan
+
+// Parameter URL opsional untuk debugging: ?t=12 → mulai di detik ke-12
+const params = new URLSearchParams(location.search);
+const T_OFFSET = parseFloat(params.get('t')) || 0;
+
+/* =====================================================================
+   CANVAS & BUFFER
+   Semua partikel di-"stamp" langsung ke ImageData (blending aditif
+   manual), lalu glow ditambahkan dengan globalCompositeOperation 'lighter'.
+   ===================================================================== */
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const hud    = document.getElementById('hud');
+const glowA  = document.createElement('canvas'), gax = glowA.getContext('2d');
+const glowB  = document.createElement('canvas'), gbx = glowB.getContext('2d');
+
+let W = 0, H = 0, CX = 0, CY = 0, F = 0, MAXD = 0;
+let img, data, u32, cols = 1, rows = 1;
+let rowInd = new Float32Array(1), rowLen = new Float32Array(1);
+
+/* ---------------------------------------------------------------------
+   Masker glyph: setiap karakter dirender sekali, piksel yang menyala
+   disimpan sebagai (dx, dy, alpha). Saat menggambar cukup menjumlahkan
+   warna ke buffer — jauh lebih cepat daripada fillText 30rb kali.
+   --------------------------------------------------------------------- */
+let gStart, gDX, gDY, gA, gOff;
+function buildGlyphs() {
+  const tmp = document.createElement('canvas');
+  tmp.width = tmp.height = 32;
+  const tx = tmp.getContext('2d', { willReadFrequently: true });
+  const dx = [], dy = [], a = [];
+  gStart = new Int32Array(SIZES.length * NC + 1);
+  let gi = 0;
+  for (const s of SIZES) {
+    const cw = Math.ceil(s * 0.62) + 1, ch = s + 2;
+    tx.font = `${s}px ui-monospace, "SF Mono", Menlo, Consolas, "Courier New", monospace`;
+    tx.textBaseline = 'top';
+    tx.fillStyle = '#fff';
+    for (let c = 0; c < NC; c++) {
+      tx.clearRect(0, 0, 32, 32);
+      tx.fillText(CHARSET[c], 0, 0);
+      const d = tx.getImageData(0, 0, cw, ch).data;
+      gStart[gi++] = dx.length;
+      for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+        const al = d[(y * cw + x) * 4 + 3];
+        if (al > 24) { dx.push(x - (cw >> 1)); dy.push(y - (ch >> 1)); a.push(al / 255); }
+      }
+    }
+  }
+  gStart[gi] = dx.length;
+  gDX = Int16Array.from(dx); gDY = Int16Array.from(dy);
+  gA = Float32Array.from(a); gOff = new Int32Array(dx.length);
+}
+
+function hash(n) { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); }
+
+function resize() {
+  const iw = innerWidth, ih = innerHeight;
+  const rs = Math.min(1, Math.sqrt(2.4e6 / (iw * ih)));   // batasi jumlah piksel
+  W = canvas.width  = Math.max(64, Math.floor(iw * rs));
+  H = canvas.height = Math.max(64, Math.floor(ih * rs));
+  img  = ctx.createImageData(W, H);
+  data = img.data;
+  u32  = new Uint32Array(data.buffer);
+  for (let j = 0; j < gOff.length; j++) gOff[j] = gDY[j] * W + gDX[j];
+  CX = W / 2; CY = H / 2;
+  F = Math.min(W, H) * 0.85;          // panjang fokus kamera
+  MAXD = Math.hypot(W, H) * 0.5;
+  glowA.width = Math.max(1, W >> 2);  glowA.height = Math.max(1, H >> 2);
+  glowB.width = Math.max(1, (W / 10) | 0); glowB.height = Math.max(1, (H / 10) | 0);
+  // Struktur "baris kode" untuk fase kekacauan (indentasi + panjang baris)
+  cols = Math.max(1, Math.floor(W / CELL_W));
+  rows = Math.max(1, Math.floor(H / CELL_H));
+  rowInd = new Float32Array(rows); rowLen = new Float32Array(rows);
+  for (let r = 0; r < rows; r++) {
+    const h = hash(r * 3.7 + 1);
+    rowInd[r] = Math.floor(hash(r + 9.1) * 6) * 4 + Math.floor(hash(r * 1.3) * cols * 0.55);
+    rowLen[r] = h < 0.15 ? 0 : 6 + h * cols * 0.45;
+  }
+}
+
+/* =====================================================================
+   DATA PARTIKEL (typed arrays — tanpa objek per partikel/per frame)
+   ===================================================================== */
+const S1 = new Float32Array(N), S2 = new Float32Array(N), S3 = new Float32Array(N);
+const S4 = new Float32Array(N), S5 = new Float32Array(N), S6 = new Float32Array(N);
+const G1 = new Float32Array(N), G2 = new Float32Array(N), G3 = new Float32Array(N);
+const UX = new Float32Array(N), UY = new Float32Array(N), UZ = new Float32Array(N);
+const CHI = new Uint8Array(N);                       // indeks karakter
+// hasil per frame
+const PX = new Int32Array(N), PY = new Int32Array(N);
+const PR = new Float32Array(N), PG = new Float32Array(N), PB = new Float32Array(N);
+const GI = new Uint16Array(N), FR = new Uint8Array(N);
+
+function gauss() { let u = 0, v = 0; while (u === 0) u = Math.random(); v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(TAU * v); }
+for (let i = 0; i < N; i++) {
+  S1[i] = Math.random(); S2[i] = Math.random(); S3[i] = Math.random();
+  S4[i] = Math.random(); S5[i] = Math.random(); S6[i] = Math.random();
+  G1[i] = gauss(); G2[i] = gauss(); G3[i] = gauss();
+  const x = gauss(), y = gauss(), z = gauss(), l = Math.hypot(x, y, z) || 1;
+  UX[i] = x / l; UY[i] = y / l; UZ[i] = z / l;
+  CHI[i] = (Math.random() * NC) | 0;
+}
+
+// Sinar ledakan (dibuat sekali)
+const NRAY = 64;
+const RAY_A = new Float32Array(NRAY), RAY_L = new Float32Array(NRAY), RAY_W = new Float32Array(NRAY);
+for (let k = 0; k < NRAY; k++) { RAY_A[k] = Math.random() * TAU; RAY_L[k] = Math.random(); RAY_W[k] = Math.random(); }
+
+/* =====================================================================
+   PALET WARNA
+   ===================================================================== */
+function buildLUT(stops) {
+  const lut = new Float32Array(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    let k = 0; while (k < stops.length - 2 && t > stops[k + 1][0]) k++;
+    const [t0, c0] = stops[k], [t1, c1] = stops[k + 1];
+    const f = Math.min(1, Math.max(0, (t - t0) / (t1 - t0)));
+    for (let c = 0; c < 3; c++) lut[i * 3 + c] = c0[c] + (c1[c] - c0[c]) * f;
+  }
+  return lut;
+}
+// Piringan akresi: putih-krem panas → emas → oranye → merah muda → magenta gelap
+const DISK_LUT = buildLUT([
+  [0.00, [255, 248, 225]], [0.12, [255, 214, 120]], [0.35, [255, 158, 58]],
+  [0.60, [255, 104, 88]],  [0.80, [236, 92, 152]],  [1.00, [150, 52, 112]]
+]);
+const CODE_COL = [[110,135,175],[115,180,150],[205,125,172],[150,156,172],[205,182,118]];
+const ARM_COL  = [[130,200,255],[180,125,255],[255,120,200],[255,220,110]]; // biru muda, ungu, pink, kuning
+
+/* =====================================================================
+   UTILITAS
+   ===================================================================== */
+const clamp01 = v => v < 0 ? 0 : v > 1 ? 1 : v;
+const sstep = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); };
+// Interpolasi keyframe [[t, nilai], ...] dengan smoothstep
+function key(T, keys) {
+  if (T <= keys[0][0]) return keys[0][1];
+  for (let k = 0; k < keys.length - 1; k++) {
+    const a = keys[k], b = keys[k + 1];
+    if (T <= b[0]) return a[1] + (b[1] - a[1]) * sstep(a[0], b[0], T);
+  }
+  return keys[keys.length - 1][1];
+}
+
+// Kurva global sepanjang siklus
+const PITCH_KEYS = [[0,0.30],[16,0.30],[19,0.95],[25.5,0.95],[27.5,0.40],[30,0.40]];          // kemiringan kamera
+const HOLE_KEYS  = [[0,0],[3.3,0],[5.5,1],[16,1],[18.5,0.45],[25.5,0.45],[27.5,0.8],[28.6,0.8],[30,0]]; // radius lubang (dunia)
+const FADE_KEYS  = [[0,0],[0.8,1],[27.6,1],[29.6,0],[30,0]];                                 // kecerahan global
+
+/* =====================================================================
+   KAMERA 3D (perspektif sederhana)
+   yaw  : berputar pelan mengelilingi sumbu Y
+   pitch: kamera sedikit di atas bidang piringan → piringan tampak elips
+   ===================================================================== */
+let cyw = 1, syw = 0, cpt = 1, spt = 0, HR = 0;
+let pX = 0, pY = 0, pS = 1, pF = 0;
+function project(x, y, z) {
+  const x1 = x * cyw - z * syw, z1 = x * syw + z * cyw;
+  const y2 = y * cpt + z1 * spt, z2 = -y * spt + z1 * cpt;
+  const zc = DIST + z2, s = F / (zc < 0.5 ? 0.5 : zc);
+  pX = CX + x1 * s; pY = CY - y2 * s;
+  pS = s * DIST / F;          // skala relatif (1 = sejajar pusat)
+  pF = z2 < 0 ? 1 : 0;        // 1 = di depan lubang hitam
+}
+
+/* =====================================================================
+   FUNGSI FASE
+   Setiap fase menghitung target partikel i pada waktu T dan menulis ke
+   variabel keluaran: posisi layar, warna, kecerahan, skala, depan/belakang.
+   ===================================================================== */
+let oX, oY, oR, oG, oB, oA, oS, oF;
+
+/* ---- FASE 1: KEKACAUAN — karakter tersebar seperti potongan kode ---- */
+function CHAOS(i, T) {
+  const row = (S2[i] * rows) | 0, col = (S1[i] * cols) | 0;
+  const inLine = col >= rowInd[row] && col < rowInd[row] + rowLen[row];
+  oX = col * CELL_W + 3 + Math.sin(T * 0.9 + S3[i] * 40) * 1.6;
+  oY = row * CELL_H + 6 + Math.cos(T * 0.7 + S4[i] * 30) * 1.2;
+  const c = CODE_COL[(S4[i] * 5) | 0];
+  oR = c[0]; oG = c[1]; oB = c[2];
+  const fl = 0.75 + 0.25 * Math.sin(T * 3 + S5[i] * 50);
+  oA = (inLine ? 0.45 + 0.35 * S5[i] : 0.08 + 0.1 * S5[i]) * fl;
+  oS = 1; oF = 1;
+}
+
+/* ---- FASE 2: TARIKAN — awan bercahaya kebiruan/krem di sekitar lubang ---- */
+function CLOUD(i, T) {
+  const r = 1.3 + Math.pow(S1[i], 1.5) * 4.4;
+  const a = T * 0.9 / r, ca = Math.cos(a), sa = Math.sin(a);
+  const x = (UX[i] * ca - UZ[i] * sa) * r;
+  const z = (UX[i] * sa + UZ[i] * ca) * r;
+  const y = UY[i] * 0.55 * r;
+  project(x, y, z);
+  const m = clamp01(S4[i] * 0.8 + 1.2 / r - 0.2);       // dekat pusat lebih krem
+  oR = 130 + 125 * m; oG = 175 + 61 * m; oB = 255 - 50 * m;
+  oA = Math.min(1.5, 0.16 + 2.2 / (r * r)) * (0.7 + 0.3 * pS);
+  oX = pX; oY = pY; oS = pS; oF = pF;
+}
+
+/* ---- FASE 3: BLACK HOLE + ACCRETION DISK (rotasi diferensial + lensing) ---- */
+function DISK(i, T) {
+  if (S6[i] < 0.22) {
+    // Citra lensa gravitasi: sisi belakang piringan "melengkung" di atas
+    // (dan tipis di bawah) lubang hitam — dihitung di ruang layar.
+    const ph = S2[i] * TAU - T * 0.8, sn = Math.sin(ph), cs = Math.cos(ph);
+    const top = sn < 0 ? -sn : 0;
+    const u = S1[i] * S1[i];
+    const rr = HR * (1.05 + (0.16 + 1.05 * top * top) * u);
+    oX = CX + cs * rr * (1 + 0.35 * top);
+    oY = CY + sn * rr * (sn < 0 ? 1 : 0.92);
+    const li = ((u * 0.55) * 255) | 0;
+    oR = DISK_LUT[li * 3]; oG = DISK_LUT[li * 3 + 1]; oB = DISK_LUT[li * 3 + 2];
+    oA = (1.0 - u * 0.55) * (1 + 0.3 * cs) * 0.85;
+    oS = 1; oF = 1;
+    return;
+  }
+  const r = 1.55 + Math.pow(S1[i], 1.8) * 5.2;
+  const th = S2[i] * TAU + T * 2.3 / Math.pow(r, 1.5);  // ω ∝ r^-1.5 (Kepler)
+  const x = r * Math.cos(th), z = r * Math.sin(th), y = G1[i] * 0.03 * r;
+  project(x, y, z);
+  const li = (clamp01((r - 1.55) / 5.2) * 255) | 0;
+  oR = DISK_LUT[li * 3]; oG = DISK_LUT[li * 3 + 1]; oB = DISK_LUT[li * 3 + 2];
+  const beam = 1 + 0.45 * Math.sin(th + Math.atan2(syw, cyw));  // efek Doppler
+  oA = (0.2 + 1.0 / (r - 0.6)) * beam * (0.6 + 0.4 * pS);
+  oX = pX; oY = pY; oS = pS; oF = pF;
+}
+
+/* ---- FASE 4: RUNTUH — tersisa cincin foton emas tipis ---- */
+function RING(i, T) {
+  if (S6[i] < 0.62) {
+    const ph = S2[i] * TAU + T * 1.6;
+    const rr = HR * (1.07 + G1[i] * 0.022);
+    oX = CX + Math.cos(ph) * rr; oY = CY + Math.sin(ph) * rr;
+    const w = S4[i] * 0.5;
+    oR = 255; oG = 196 + 50 * w; oB = 90 + 110 * w;
+    oA = 0.3; oS = 1; oF = 1;
+  } else {               // sisanya tersedot ke dalam lubang
+    oX = CX; oY = CY; oR = 255; oG = 200; oB = 120; oA = 0; oS = 1; oF = 0;
+  }
+}
+
+/* ---- FASE 5: LEDAKAN — partikel terlempar ke segala arah ---- */
+function BLAST(i, T) {
+  const tl = T - 16 > 0 ? T - 16 : 0;
+  const a = S2[i] * TAU, sp = 0.2 + Math.pow(S1[i], 0.7) * 0.95;
+  const dist = HR + sp * MAXD * 0.8 * (1 - Math.exp(-tl * 2.4));
+  oX = CX + Math.cos(a) * dist; oY = CY + Math.sin(a) * dist * 0.9;
+  const c = ARM_COL[i & 3], m = clamp01(tl * 1.1);
+  oR = 255 + (c[0] - 255) * m; oG = 255 + (c[1] - 255) * m; oB = 255 + (c[2] - 255) * m;
+  oA = 1.3 * Math.exp(-tl * 1.1) + 0.3;
+  oS = 1; oF = 1;
+}
+
+/* ---- FASE 6: GALAKSI SPIRAL — 4 lengan menggulung ke dalam ---- */
+function GALAXY(i, T) {
+  const tg = T - 17;
+  const shrink = 1 - 0.32 * sstep(17, 26, T);
+  const kind = S6[i];
+  let x, y, z, r0;
+  if (kind < 0.12) {                         // tonjolan inti
+    r0 = 0.55 + Math.abs(G1[i]) * 0.75;
+    const a = T * 0.8 / r0, ca = Math.cos(a), sa = Math.sin(a);
+    x = (UX[i] * ca - UZ[i] * sa) * r0 * shrink;
+    z = (UX[i] * sa + UZ[i] * ca) * r0 * shrink;
+    y = UY[i] * 0.6 * r0 * shrink;
+    project(x, y, z);
+    oR = 255; oG = 232; oB = 188; oA = 0.5 + 0.45 / r0;
+  } else if (kind < 0.17) {                  // cincin bercahaya di sekitar lubang kecil
+    r0 = 0.62 + G1[i] * 0.025;
+    const th = S2[i] * TAU + T * 2.6;
+    project(r0 * Math.cos(th), 0, r0 * Math.sin(th));
+    oR = 255; oG = 215; oB = 140; oA = 1.0;
+  } else {                                   // lengan spiral logaritmik
+    const arm = i & 3;
+    r0 = 0.75 + Math.pow(S1[i], 1.25) * 6.6;
+    const wind = 0.85 + 0.09 * (tg > 0 ? tg : 0);       // lengan makin tergulung
+    const th = arm * (TAU / 4) + wind * Math.log(r0) * 2.0
+             + G1[i] * (0.22 + 0.1 / r0) - T * 0.6 / Math.sqrt(r0);
+    const r = (r0 + G2[i] * 0.12 * Math.sqrt(r0)) * shrink;
+    x = r * Math.cos(th); z = r * Math.sin(th); y = G3[i] * 0.07 * Math.sqrt(r0);
+    project(x, y, z);
+    const c = ARM_COL[arm], m = Math.exp(-r0 / 1.3);
+    if (S5[i] > 0.94) { oR = 240; oG = 240; oB = 255; }  // bintang putih acak
+    else { oR = c[0] + (255 - c[0]) * m; oG = c[1] + (238 - c[1]) * m; oB = c[2] + (200 - c[2]) * m; }
+    oA = (0.26 + 0.9 / (r0 + 0.2)) * (0.8 + 0.4 * S4[i]);
+  }
+  oA *= 0.6 + 0.4 * pS;
+  oX = pX; oY = pY; oS = pS; oF = pF;
+}
+
+/* ---- FASE 7: AKHIR — cincin emas besar + jet ke atas, lalu memudar ---- */
+function FINALE(i, T) {
+  const kind = S6[i];
+  if (kind < 0.62) {                         // cincin emas besar
+    const r = 3.5 + G1[i] * 0.12, th = S2[i] * TAU + T * 0.9;
+    project(r * Math.cos(th), G2[i] * 0.04, r * Math.sin(th));
+    const w = S4[i];
+    oR = 255; oG = 185 + 45 * w; oB = 75 + 80 * w;
+    oA = 0.26 * (0.6 + 0.4 * pS);
+  } else if (kind < 0.86) {                  // jet partikel ke atas
+    let h = S1[i] + T * 0.5; h -= Math.floor(h);
+    const spread = 0.06 + h * 0.55;
+    project(G1[i] * spread, 0.85 + h * 7.5, G2[i] * spread);
+    oR = 235 - 95 * h; oG = 245 - 55 * h; oB = 255;
+    oA = (1 - h) * (1 - h) * 0.8 + 0.04;
+  } else {                                   // tersedot ke pusat
+    oX = CX; oY = CY; oR = 255; oG = 200; oB = 120; oA = 0; oS = 1; oF = 0;
+    return;
+  }
+  oX = pX; oY = pY; oS = pS; oF = pF;
+}
+
+/* =====================================================================
+   LINIMASA — [mulai, selesai, faseA, faseB, stagger, pinch, urut-radius]
+   Di dalam segmen, partikel diinterpolasi A→B dengan smoothstep. Stagger
+   membuat tiap partikel berangkat di waktu sedikit berbeda; pinch menarik
+   lintasan ke pusat (efek "tersedot").
+   ===================================================================== */
+const SEGMENTS = [
+  [ 0.0,  3.0, CHAOS,  CHAOS,  0,    0,    0],  // 1. kekacauan
+  [ 3.0,  5.8, CHAOS,  CLOUD,  0.45, 0.25, 0],  // 2. tarikan
+  [ 5.8,  6.5, CLOUD,  CLOUD,  0,    0,    0],
+  [ 6.5,  8.8, CLOUD,  DISK,   0.4,  0,    0],  // 3. pembentukan piringan
+  [ 8.8, 14.0, DISK,   DISK,   0,    0,    0],
+  [14.0, 16.0, DISK,   RING,   0.5,  0,    1],  // 4. runtuh (dalam dulu)
+  [16.0, 16.25, RING,  BLAST,  0.2,  0,    0],  // 5. ledakan
+  [16.25, 17.3, BLAST, BLAST,  0,    0,    0],
+  [17.3, 19.8, BLAST,  GALAXY, 0.4,  0,    0],  // 6. galaksi spiral
+  [19.8, 25.5, GALAXY, GALAXY, 0,    0,    0],
+  [25.5, 27.6, GALAXY, FINALE, 0.45, 0.75, 1],  // 7. tersedot → cincin + jet
+  [27.6, 30.0, FINALE, FINALE, 0,    0,    0],
+];
+const PHASE_NAME = new Map([[CHAOS,'chaos'],[CLOUD,'infall'],[DISK,'accretion disk'],[RING,'collapse'],
+                            [BLAST,'explosion'],[GALAXY,'spiral galaxy'],[FINALE,'jet']]);
+
+/* =====================================================================
+   RENDER
+   ===================================================================== */
+// Tambahkan glyph partikel ke buffer (blending aditif, clamp otomatis 0..255)
+function stampPass(front) {
+  const d = data, off = gOff, ga = gA, gs = gStart, w = W;
+  const xmax = W - 7, ymax = H - 8;
+  for (let i = 0; i < N; i++) {
+    if (FR[i] !== front) continue;
+    const r = PR[i], g = PG[i], b = PB[i];
+    if (r + g + b < 3) continue;
+    const px = PX[i], py = PY[i];
+    if (px < 7 || py < 8 || px >= xmax || py >= ymax) continue;
+    const base = py * w + px, gi = GI[i];
+    for (let j = gs[gi], e = gs[gi + 1]; j < e; j++) {
+      const p = (base + off[j]) << 2, a = ga[j];
+      d[p] += r * a; d[p + 1] += g * a; d[p + 2] += b * a;
+    }
+  }
+}
+
+// Lingkaran hitam pekat lubang hitam (menutup partikel di belakangnya)
+function fillHole() {
+  const R = HR; if (R < 1) return;
+  const y0 = Math.max(0, Math.ceil(CY - R)), y1 = Math.min(H - 1, Math.floor(CY + R));
+  for (let y = y0; y <= y1; y++) {
+    const dy = y + 0.5 - CY, hw = Math.sqrt(Math.max(0, R * R - dy * dy));
+    const x0 = Math.max(0, Math.round(CX - hw)), x1 = Math.min(W, Math.round(CX + hw));
+    if (x1 > x0) u32.fill(0xFF000000, y * W + x0, y * W + x1);
+  }
+}
+
+// Kilatan, layar memutih, dan garis-garis cahaya saat ledakan
+function blastEffects(T) {
+  const tb = T - 16;
+  if (tb < -0.35 || tb > 1.6) return;
+  ctx.globalCompositeOperation = 'lighter';
+  // kilatan inti
+  const fl = tb < 0 ? (tb + 0.35) / 0.35 : Math.exp(-tb * 2.4);
+  const rad = Math.max(4, HR * (1.2 + Math.max(0, tb) * 9));
+  const g = ctx.createRadialGradient(CX, CY, 0, CX, CY, rad);
+  g.addColorStop(0, `rgba(255,255,255,${0.95 * fl})`);
+  g.addColorStop(0.35, `rgba(255,235,200,${0.5 * fl})`);
+  g.addColorStop(1, 'rgba(255,200,150,0)');
+  ctx.globalAlpha = 1; ctx.fillStyle = g;
+  ctx.fillRect(CX - rad, CY - rad, rad * 2, rad * 2);
+  // garis cahaya memancar
+  if (tb > 0) {
+    const e = 1 - Math.pow(1 - clamp01(tb / 0.9), 3), fade = 1 - sstep(0.25, 1.5, tb);
+    for (let k = 0; k < NRAY; k++) {
+      const len = MAXD * (0.35 + 0.8 * RAY_L[k]) * e, ca = Math.cos(RAY_A[k]), sa = Math.sin(RAY_A[k]);
+      const r0 = HR * 0.8 + len * 0.15;
+      const lg = ctx.createLinearGradient(CX + ca * r0, CY + sa * r0, CX + ca * len, CY + sa * len);
+      lg.addColorStop(0, `rgba(255,245,230,${0.7 * fade * (0.4 + 0.6 * RAY_W[k])})`);
+      lg.addColorStop(1, 'rgba(160,200,255,0)');
+      ctx.strokeStyle = lg; ctx.lineWidth = 0.6 + RAY_W[k] * 2.2;
+      ctx.beginPath(); ctx.moveTo(CX + ca * r0, CY + sa * r0); ctx.lineTo(CX + ca * len, CY + sa * len); ctx.stroke();
+    }
+  }
+  // layar memutih sesaat
+  const wo = sstep(-0.12, 0.03, tb) * (1 - sstep(0.06, 0.7, tb));
+  if (wo > 0.002) {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = `rgba(255,252,245,${wo * 0.93})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+/* =====================================================================
+   LOOP UTAMA
+   ===================================================================== */
+let t0 = performance.now(), last = t0, fps = 60, hudTimer = 0, flipAcc = 0;
+
+function frame(now) {
+  const dt = Math.min(100, now - last); last = now;
+  fps += ((1000 / Math.max(1, dt)) - fps) * 0.08;
+  const T = ((now - t0) / 1000 + T_OFFSET) % LOOP;
+
+  // --- kamera & parameter global ---
+  const yaw = T * 0.16, pitch = key(T, PITCH_KEYS);
+  cyw = Math.cos(yaw); syw = Math.sin(yaw); cpt = Math.cos(pitch); spt = Math.sin(pitch);
+  HR = key(T, HOLE_KEYS) * F / DIST;               // radius lubang di layar (px)
+  const GB = key(T, FADE_KEYS);
+
+  // --- segmen linimasa aktif ---
+  let seg = SEGMENTS[SEGMENTS.length - 1];
+  for (let s = 0; s < SEGMENTS.length; s++) if (T < SEGMENTS[s][1]) { seg = SEGMENTS[s]; break; }
+  const [s0, s1, A, B, st, pinch, byR] = seg;
+  const k = clamp01((T - s0) / (s1 - s0));
+
+  // --- karakter berganti acak agar terlihat "hidup" ---
+  flipAcc += N * 0.6 * dt / 1000;
+  while (flipAcc >= 1) { CHI[(Math.random() * N) | 0] = (Math.random() * NC) | 0; flipAcc--; }
+
+  // --- hitung semua partikel (satu loop) ---
+  for (let i = 0; i < N; i++) {
+    if (A === B) {
+      A(i, T);
+    } else {
+      const d = byR ? S1[i] : S5[i];
+      let ki = clamp01((k - d * st) / (1 - st));
+      ki = ki * ki * (3 - 2 * ki);
+      if (ki <= 0) A(i, T);
+      else if (ki >= 1) B(i, T);
+      else {
+        A(i, T);
+        const aX = oX, aY = oY, aR = oR, aG = oG, aB = oB, aA = oA, aS = oS, aF = oF;
+        B(i, T);
+        oX = aX + (oX - aX) * ki; oY = aY + (oY - aY) * ki;
+        oR = aR + (oR - aR) * ki; oG = aG + (oG - aG) * ki; oB = aB + (oB - aB) * ki;
+        oA = aA + (oA - aA) * ki; oS = aS + (oS - aS) * ki;
+        // Selama transisi, partikel di dalam lingkaran lubang selalu
+        // dianggap di belakang → lubang tetap hitam pekat.
+        const dx = oX - CX, dy = oY - CY;
+        oF = (dx * dx + dy * dy < HR * HR * 1.1) ? 0 : (ki < 0.5 ? aF : oF);
+        if (pinch) {                         // lintasan melengkung ke pusat
+          const m = 1 - pinch * Math.sin(Math.PI * ki);
+          oX = CX + (oX - CX) * m; oY = CY + (oY - CY) * m;
+        }
+      }
+    }
+    const b = oA * GB;
+    PX[i] = oX | 0; PY[i] = oY | 0;
+    PR[i] = oR * b; PG[i] = oG * b; PB[i] = oB * b;
+    GI[i] = (oS > 1.1 ? NC : 0) + CHI[i];
+    FR[i] = oF;
+  }
+
+  // --- gambar: belakang → lubang hitam → depan ---
+  u32.fill(0xFF000000);
+  stampPass(0);
+  fillHole();
+  stampPass(1);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  ctx.putImageData(img, 0, 0);
+
+  // --- glow halus (downscale + 'lighter'), bagian lubang dipotong ---
+  const aw = glowA.width, ah = glowA.height, bw = glowB.width, bh = glowB.height;
+  gax.globalCompositeOperation = 'source-over';
+  gax.clearRect(0, 0, aw, ah);
+  gax.drawImage(canvas, 0, 0, aw, ah);
+  gbx.globalCompositeOperation = 'source-over';
+  gbx.clearRect(0, 0, bw, bh);
+  gbx.drawImage(glowA, 0, 0, bw, bh);
+  if (HR > 1) {
+    gax.globalCompositeOperation = gbx.globalCompositeOperation = 'destination-out';
+    gax.beginPath(); gax.arc(CX * aw / W, CY * ah / H, HR * aw / W * 0.95, 0, TAU); gax.fill();
+    gbx.beginPath(); gbx.arc(CX * bw / W, CY * bh / H, HR * bw / W * 0.9, 0, TAU); gbx.fill();
+  }
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.imageSmoothingEnabled = true;
+  ctx.globalAlpha = 0.55; ctx.drawImage(glowA, 0, 0, W, H);
+  ctx.globalAlpha = 0.7;  ctx.drawImage(glowB, 0, 0, W, H);
+  ctx.globalAlpha = 1;
+
+  // --- latar #0b0d14 (kecuali lubang yang tetap hitam pekat) ---
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.fillStyle = '#0b0d14';
+  ctx.beginPath(); ctx.rect(0, 0, W, H);
+  if (HR > 1) ctx.arc(CX, CY, HR, 0, TAU);
+  ctx.fill('evenodd');
+
+  // --- efek ledakan ---
+  blastEffects(T);
+  ctx.globalCompositeOperation = 'source-over';
+
+  // --- HUD terminal ---
+  hudTimer += dt;
+  if (hudTimer > 400) {
+    hudTimer = 0;
+    hud.textContent = `particles: ${N} | 3d camera | ${Math.round(fps)} fps\n> phase: ${PHASE_NAME.get(k < 0.5 ? A : B)}  t=${T.toFixed(1)}s`;
+  }
+  requestAnimationFrame(frame);
+}
+
+buildGlyphs();
+resize();
+addEventListener('resize', resize);
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
